@@ -84,18 +84,18 @@ async def compress_video(input_file: str, output_file: str):
     # Target size 45MB to be safe (45 * 8192 kilobits)
     # This is a simplified 1-pass FFmpeg compression command.
     command = [
-        "ffmpeg",
+        "./ffmpeg",
         "-y",
         "-i",
-        input_file,
+        input_file,  # Changed "ffmpeg" to "./ffmpeg"
         "-fs",
-        "45M",  # Force output size to 45 MB max
+        "45M",
         "-c:v",
-        "libx264",  # Video codec
+        "libx264",
         "-preset",
         "fast",
         "-c:a",
-        "aac",  # Audio codec
+        "aac",
         output_file,
     ]
     process = await asyncio.create_subprocess_exec(
@@ -110,6 +110,7 @@ def get_yt_dlp_options(format_type: str, filename: str) -> dict:
         "outtmpl": filename,
         "noplaylist": True,
         "quiet": True,
+        "ffmpeg_location": "./",  # ADD THIS LINE: Points yt-dlp to your local files
         "cookiefile": "cookies.txt",  # UNCOMMENT this line if you provide a cookies.txt file for auth
     }
 

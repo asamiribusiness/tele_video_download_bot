@@ -1,77 +1,32 @@
-import asyncio
 import os
-import sqlite3
 import time
-
-import yt_dlp
-from aiohttp import web
+import asyncio
+import sqlite3
+import uuid
+import re
 from dotenv import load_dotenv
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from aiohttp import web
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
-    CallbackQueryHandler,
     CommandHandler,
-    ContextTypes,
     MessageHandler,
+    CallbackQueryHandler,
     filters,
+    ContextTypes,
 )
+import yt_dlp
 
 # Load secrets
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", 10000))
 
-
 # ==========================================
-# WEB SERVER SETUP (Render Keep-Alive)
-# ==========================================
-async def health_check(request):
-    return web.Response(text="Bot is running 24/7!")
-
-
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get("/", health_check)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    print(f"Web server started on port {PORT}")
-
-
-# ==========================================
-# MAIN ENTRYPOINT (Clean Asyncio Loop)
-# ==========================================
-async def main():
-    # Initialize DB
-    init_db()
-
-    # 1. Build the Telegram Application
-    application = Application.builder().token(BOT_TOKEN).build()
-
-    # Add Handlers
-    application.add_handler(CommandHandler("start", start_cmd))
-    application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, link_received)
-    )
-    application.add_handler(CallbackQueryHandler(button_handler))
-
-    # 2. Start the web server and bot together cleanly
-    await start_web_server()
-
-    # Initialize and start polling natively without nest_asyncio
-    async with application:
-        await application.start()
-        await application.updater.start_polling()
-        # Keep the event loop running forever
-        await asyncio.Event().wait()
-
-
-# ==========================================
-# 1. DATABASE & ANTI-SPAM (SQLite)
+# 1. DATABASE (Anti-Spam per User)
 # ==========================================
 DB_FILE = "bot_users.db"
-COOLDOWN_SECONDS = 30  # Anti-spam restriction
+COOLDOWN_SECONDS = 30
 
 
 def init_db():
@@ -89,7 +44,7 @@ def init_db():
 
 
 def check_spam_and_update(user_id: int, username: str) -> bool:
-    """Returns True if user is allowed, False if they are spamming."""
+    """Tracks users across all groups. Ensures individual spammers are blocked."""
     current_time = time.time()
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
@@ -99,13 +54,11 @@ def check_spam_and_update(user_id: int, username: str) -> bool:
         result = cursor.fetchone()
 
         if result:
-            last_time = result[0]
-            if current_time - last_time < COOLDOWN_SECONDS:
-                return False  # Spam detected
+            if current_time - result[0] < COOLDOWN_SECONDS:
+                return False
             cursor.execute(
                 """
-                UPDATE users 
-                SET last_request_time=?, total_requests=total_requests+1 
+                UPDATE users SET last_request_time=?, total_requests=total_requests+1 
                 WHERE user_id=?
             """,
                 (current_time, user_id),
@@ -116,24 +69,22 @@ def check_spam_and_update(user_id: int, username: str) -> bool:
                 INSERT INTO users (user_id, username, last_request_time, total_requests) 
                 VALUES (?, ?, ?, 1)
             """,
-                (user_id, username, current_time),
+                (user_id, username, current_time, 1),
             )
         conn.commit()
     return True
 
 
 # ==========================================
-# 2. MEDIA PROCESSING & DOWNLOADING
+# 2. MEDIA PROCESSING (Static FFmpeg)
 # ==========================================
 async def compress_video(input_file: str, output_file: str):
-    """Automatically compresses video to bypass Telegram's 50MB limit using FFmpeg."""
-    # Target size 45MB to be safe (45 * 8192 kilobits)
-    # This is a simplified 1-pass FFmpeg compression command.
+    """Runs local static FFmpeg as a non-blocking background task."""
     command = [
         "./ffmpeg",
         "-y",
         "-i",
-        input_file,  # Changed "ffmpeg" to "./ffmpeg"
+        input_file,  # Pointing to local ffmpeg binary
         "-fs",
         "45M",
         "-c:v",
@@ -151,13 +102,12 @@ async def compress_video(input_file: str, output_file: str):
 
 
 def get_yt_dlp_options(format_type: str, filename: str) -> dict:
-    """Configures yt-dlp based on format (Video or MP3) and handles cookies."""
     opts = {
         "outtmpl": filename,
         "noplaylist": True,
         "quiet": True,
-        "ffmpeg_location": "./",  # ADD THIS LINE: Points yt-dlp to your local files
-        "cookiefile": "cookies.txt",  # UNCOMMENT this line if you provide a cookies.txt file for auth
+        "ffmpeg_location": "./",  # Tells yt-dlp to use local static ffmpeg/ffprobe
+        # 'cookiefile': 'cookies.txt', # Uncomment if adding cookies later
     }
 
     if format_type == "audio":
@@ -174,94 +124,131 @@ def get_yt_dlp_options(format_type: str, filename: str) -> dict:
             }
         )
     else:
-        # Try to get best video under 50MB, if none exists, get best and we compress later
         opts.update(
-            {"format": "best[filesize<=50M]/bestvideo[filesize<=50M]+bestaudio/best"}
+            {"format": "best[filesize<=48M]/bestvideo[filesize<=48M]+bestaudio/best"}
         )
 
     return opts
 
 
 # ==========================================
-# 3. TELEGRAM BOT HANDLERS
+# 3. TELEGRAM HANDLERS
 # ==========================================
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    check_spam_and_update(user.id, user.username)
+def extract_url(text: str) -> str:
+    """Finds the first http/https link in a message."""
+    if not text:
+        return None
+    match = re.search(r"(https?://[^\s]+)", text)
+    return match.group(1) if match else None
 
+
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_msg = (
         "🇬🇧 **Welcome to the Video Downloader Bot!**\n"
-        "Send me any social media link (YouTube, Instagram, TikTok, Twitter) to download it.\n\n"
+        "Send me any social media link (YouTube, Instagram, TikTok) to download it, even in groups.\n\n"
         "🇦🇫 **به ربات دانلود ویدیو خوش آمدید!**\n"
-        "هر لینک شبکه اجتماعی را برای دانلود بفرستید."
+        "هر لینک شبکه اجتماعی را برای دانلود بفرستید، حتی در گروه ها."
     )
     await update.message.reply_text(welcome_msg, parse_mode="Markdown")
 
 
 async def link_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text
     user = update.effective_user
+
+    url = extract_url(update.message.text)
+    if not url:
+        return  # Ignore messages without links
 
     if not check_spam_and_update(user.id, user.username):
         await update.message.reply_text(
-            f"⏳ Please wait {COOLDOWN_SECONDS} seconds between requests. (لطفا کمی صبر کنید)"
+            f"⏳ Wait {COOLDOWN_SECONDS}s. (صبر کنید)",
+            reply_to_message_id=update.message.message_id,
         )
         return
 
-    # Inline Keyboard for Format Selection
+    # Store long URL in memory, generate short ID for button
+    task_id = str(uuid.uuid4())[:8]
+    if "tasks" not in context.bot_data:
+        context.bot_data["tasks"] = {}
+    context.bot_data["tasks"][task_id] = url
+
+    # Inline Keyboard with short ID and user ID
     keyboard = [
-        [InlineKeyboardButton("🎬 Download Video (ویدیو)", callback_data=f"vid|{url}")],
-        [InlineKeyboardButton("🎵 Extract Audio (صدا)", callback_data=f"aud|{url}")],
+        [
+            InlineKeyboardButton(
+                "🎬 Video (ویدیو)", callback_data=f"vid|{task_id}|{user.id}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🎵 MP3 (صدا)", callback_data=f"aud|{task_id}|{user.id}"
+            )
+        ],
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "Choose a format (فرمت را انتخاب کنید):", reply_markup=reply_markup
+        "Choose format (فرمت را انتخاب کنید):",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_to_message_id=update.message.message_id,
     )
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    clicker_id = query.from_user.id
+
+    # Parse callback data
+    req_type, task_id, original_user_id = query.data.split("|")
+
+    # Verify clicker is the person who sent the link
+    if str(clicker_id) != original_user_id:
+        await query.answer("This is not your request! ❌", show_alert=True)
+        return
+
     await query.answer()
 
-    req_type, url = query.data.split("|", 1)
-    chat_id = query.message.chat_id
+    url = context.bot_data["tasks"].get(task_id)
+    if not url:
+        await query.edit_message_text("❌ Error: Task expired or link lost.")
+        return
 
-    status_msg = await context.bot.send_message(
-        chat_id=chat_id, text="⏳ Processing... (در حال پردازش...)"
-    )
+    chat_id = query.message.chat_id
+    status_msg = await query.edit_message_text("⏳ Downloading... (در حال دانلود...)")
 
     file_id = f"{chat_id}_{int(time.time())}"
     raw_file = f"{file_id}.%(ext)s"
-    final_file = f"{file_id}.mp4" if req_type == "vid" else f"{file_id}.mp3"
-
-    opts = get_yt_dlp_options("audio" if req_type == "aud" else "video", raw_file)
 
     try:
-        # 1. Download Media
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            downloaded_file = ydl.prepare_filename(info)
+        opts = get_yt_dlp_options("audio" if req_type == "aud" else "video", raw_file)
 
-            # If audio, yt-dlp changes the extension to .mp3 automatically
-            if req_type == "aud":
-                downloaded_file = downloaded_file.rsplit(".", 1)[0] + ".mp3"
+        # Run yt_dlp without blocking the async event loop
+        loop = asyncio.get_running_loop()
 
-        # 2. Check Size & Compress if Video is > 48MB
-        file_size_mb = os.path.getsize(downloaded_file) / (1024 * 1024)
-        if req_type == "vid" and file_size_mb > 48.0:
+        def download_sync():
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                return ydl.prepare_filename(info)
+
+        downloaded_file = await loop.run_in_executor(None, download_sync)
+        if req_type == "aud":
+            downloaded_file = downloaded_file.rsplit(".", 1)[0] + ".mp3"
+
+        # Compress if video is over 48MB
+        if (
+            req_type == "vid"
+            and (os.path.getsize(downloaded_file) / (1024 * 1024)) > 48.0
+        ):
             await context.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=status_msg.message_id,
-                text="🗜 File is large. Compressing... (در حال فشرده سازی...)",
+                text="🗜 Compressing... (در حال فشرده سازی...)",
             )
-            compressed_file = f"compressed_{file_id}.mp4"
+            compressed_file = f"comp_{file_id}.mp4"
             await compress_video(downloaded_file, compressed_file)
 
             if os.path.exists(downloaded_file):
                 os.remove(downloaded_file)
             downloaded_file = compressed_file
 
-        # 3. Send Media
         await context.bot.edit_message_text(
             chat_id=chat_id,
             message_id=status_msg.message_id,
@@ -276,9 +263,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await context.bot.send_audio(chat_id=chat_id, audio=f)
 
-        # 4. Success Message
+        await context.bot.delete_message(
+            chat_id=chat_id, message_id=status_msg.message_id
+        )
         await context.bot.send_message(
-            chat_id=chat_id, text="✅ Download finished! (دانلود با موفقیت انجام شد!)"
+            chat_id=chat_id,
+            text="✅ Download finished! (دانلود با موفقیت انجام شد!)",
+            reply_to_message_id=query.message.reply_to_message.message_id
+            if query.message.reply_to_message
+            else None,
         )
 
     except yt_dlp.utils.DownloadError as e:
@@ -289,23 +282,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             reply = "❌ Error downloading the media. The link might be invalid or unsupported."
-        await context.bot.send_message(chat_id=chat_id, text=reply)
+        await context.bot.edit_message_text(
+            chat_id=chat_id, message_id=status_msg.message_id, text=reply
+        )
 
     finally:
-        # Cleanup residual files
+        # Cleanup memory and files
+        context.bot_data["tasks"].pop(task_id, None)
         for f in os.listdir("."):
             if file_id in f and os.path.exists(f):
                 os.remove(f)
-        await context.bot.delete_message(
-            chat_id=chat_id, message_id=status_msg.message_id
-        )
 
 
 # ==========================================
-# 4. WEB SERVICE SETUP (For Render.com)
+# 4. WEB SERVER (Render Keep-Alive)
 # ==========================================
 async def health_check(request):
-    return web.Response(text="Bot is running smoothly 24/7!")
+    return web.Response(text="Bot is running 24/7!")
 
 
 async def start_web_server():
@@ -315,13 +308,15 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    print(f"Web server listening on port {PORT}")
+    print(f"Web server started on port {PORT}")
 
 
+# ==========================================
+# 5. MAIN ENTRYPOINT (Clean Asyncio Loop)
+# ==========================================
 async def main():
     init_db()
 
-    # Initialize Bot
     application = Application.builder().token(BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start_cmd))
@@ -330,21 +325,15 @@ async def main():
     )
     application.add_handler(CallbackQueryHandler(button_handler))
 
-    # Start bot and web server simultaneously
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-
     await start_web_server()
 
-    # Keep application running
-    while True:
-        await asyncio.sleep(3600)
+    # Run the bot loop natively
+    async with application:
+        await application.start()
+        await application.updater.start_polling()
+        # Keep the event loop running forever
+        await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
-    # nest_asyncio allows async code execution in environments with existing loops
-    import nest_asyncio
-
-    # nest_asyncio.apply()
     asyncio.run(main())

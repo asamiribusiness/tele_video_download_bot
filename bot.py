@@ -1,25 +1,71 @@
-import os
-import time
 import asyncio
+import os
 import sqlite3
-import subprocess
-from dotenv import load_dotenv
+import time
+
+import yt_dlp
 from aiohttp import web
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from dotenv import load_dotenv
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
-    CommandHandler,
-    MessageHandler,
     CallbackQueryHandler,
-    filters,
+    CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
-import yt_dlp
 
 # Load secrets
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", 10000))
+
+
+# ==========================================
+# WEB SERVER SETUP (Render Keep-Alive)
+# ==========================================
+async def health_check(request):
+    return web.Response(text="Bot is running 24/7!")
+
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    print(f"Web server started on port {PORT}")
+
+
+# ==========================================
+# MAIN ENTRYPOINT (Clean Asyncio Loop)
+# ==========================================
+async def main():
+    # Initialize DB
+    init_db()
+
+    # 1. Build the Telegram Application
+    application = Application.builder().token(BOT_TOKEN).build()
+
+    # Add Handlers
+    application.add_handler(CommandHandler("start", start_cmd))
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, link_received)
+    )
+    application.add_handler(CallbackQueryHandler(button_handler))
+
+    # 2. Start the web server and bot together cleanly
+    await start_web_server()
+
+    # Initialize and start polling natively without nest_asyncio
+    async with application:
+        await application.start()
+        await application.updater.start_polling()
+        # Keep the event loop running forever
+        await asyncio.Event().wait()
+
 
 # ==========================================
 # 1. DATABASE & ANTI-SPAM (SQLite)
@@ -300,5 +346,5 @@ if __name__ == "__main__":
     # nest_asyncio allows async code execution in environments with existing loops
     import nest_asyncio
 
-    nest_asyncio.apply()
+    # nest_asyncio.apply()
     asyncio.run(main())

@@ -1,27 +1,29 @@
-import os
-import time
 import asyncio
-import sqlite3
-import uuid
+import os
 import re
-from dotenv import load_dotenv
+import sqlite3
+import time
+import uuid
+
+import cronitor
+import yt_dlp
 from aiohttp import web
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from dotenv import load_dotenv
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
-    CommandHandler,
-    MessageHandler,
     CallbackQueryHandler,
-    filters,
+    CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
-import yt_dlp
 
 # Load secrets
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", 10000))
-
+cronitor.api_key = "5b9594d9644a4382bfe48956082ded6b"
 # ==========================================
 # 1. DATABASE (Anti-Spam per User)
 # ==========================================
@@ -333,6 +335,13 @@ async def main():
         await application.updater.start_polling()
         # Keep the event loop running forever
         await asyncio.Event().wait()
+    monitor = cronitor.Monitor("important-heartbeat")
+
+    # send a heartbeat event with a message
+    monitor.ping(message="Alive!")
+
+    # include counts & error counts
+    monitor.ping(metrics={"count": 100, "error_count": 3})
 
 
 if __name__ == "__main__":

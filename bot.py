@@ -142,11 +142,21 @@ def get_yt_dlp_options(format_type: str, filename: str) -> dict:
 # 3. TELEGRAM HANDLERS
 # ==========================================
 def extract_url(text: str) -> str:
-    """Finds the first http/https link in a message."""
+    """Finds the first link in a message, even without http://"""
     if not text:
         return None
-    match = re.search(r"(https?://[^\s]+)", text)
-    return match.group(1) if match else None
+    # Smarter Regex to catch links like www.instagram.com or tiktok.com
+    match = re.search(
+        r"((?:https?://)?(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9()@:%_\+.~#?&//=]*))",
+        text,
+    )
+
+    if match:
+        url = match.group(1)
+        if not url.startswith("http"):
+            url = "https://" + url  # yt-dlp requires https://
+        return url
+    return None
 
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -161,43 +171,64 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def link_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
+    try:
+        # Safely get the message (handles standard texts, edited texts, and channel posts)
+        message = update.message or update.edited_message
+        if not message:
+            return
 
-    url = extract_url(update.message.text)
-    if not url:
-        return  # Ignore messages without links
+        user = update.effective_user
 
-    if not check_spam_and_update(user.id, user.username):
-        await update.message.reply_text(
-            f"⏳ Wait {COOLDOWN_SECONDS}s. (صبر کنید)",
-            reply_to_message_id=update.message.message_id,
+        # Look for links in BOTH standard text AND media captions
+        text = message.text or message.caption
+        url = extract_url(text)
+
+        if not url:
+            return  # Ignore messages that don't contain a link
+
+        # Safely handle users who do not have a Telegram username set
+        username = user.username if user and user.username else "Unknown"
+        user_id = user.id if user else 0
+
+        # Check anti-spam database
+        if not check_spam_and_update(user_id, username):
+            await message.reply_text(
+                f"⏳ Wait {COOLDOWN_SECONDS}s. (صبر کنید)",
+                reply_to_message_id=message.message_id,
+            )
+            return
+
+        # Store long URL in memory, generate short ID for button
+        task_id = str(uuid.uuid4())[:8]
+        if "tasks" not in context.bot_data:
+            context.bot_data["tasks"] = {}
+        context.bot_data["tasks"][task_id] = url
+
+        # Inline Keyboard with short ID and user ID
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "🎬 Video (ویدیو)", callback_data=f"vid|{task_id}|{user_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🎵 MP3 (صدا)", callback_data=f"aud|{task_id}|{user_id}"
+                )
+            ],
+        ]
+        await message.reply_text(
+            "Choose format (فرمت را انتخاب کنید):",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_to_message_id=message.message_id,
         )
-        return
 
-    # Store long URL in memory, generate short ID for button
-    task_id = str(uuid.uuid4())[:8]
-    if "tasks" not in context.bot_data:
-        context.bot_data["tasks"] = {}
-    context.bot_data["tasks"][task_id] = url
-
-    # Inline Keyboard with short ID and user ID
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "🎬 Video (ویدیو)", callback_data=f"vid|{task_id}|{user.id}"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🎵 MP3 (صدا)", callback_data=f"aud|{task_id}|{user.id}"
-            )
-        ],
-    ]
-    await update.message.reply_text(
-        "Choose format (فرمت را انتخاب کنید):",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        reply_to_message_id=update.message.message_id,
-    )
+    except Exception as e:
+        # IF IT FAILS, THE BOT WILL NOW SEND YOU THE EXACT ERROR MESSAGE IN TELEGRAM
+        error_text = f"⚠️ Internal Bot Error:\n{str(e)}"
+        if update.message:
+            await update.message.reply_text(error_text)
+        print(error_text)
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -356,7 +387,9 @@ async def main():
     application = Application.builder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start_cmd))
     application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, link_received)
+        MessageHandler(
+            (filters.TEXT | filters.CAPTION) & ~filters.COMMAND, link_received
+        )
     )
     application.add_handler(CallbackQueryHandler(button_handler))
 

@@ -68,10 +68,11 @@ def check_spam_and_update(user_id: int, username: str) -> bool:
                 (current_time, user_id),
             )
         else:
+            # FIXED: Added the 4th question mark (?) to match the 4 values supplied below
             cursor.execute(
                 """
                 INSERT INTO users (user_id, username, last_request_time, total_requests) 
-                VALUES (?, ?, ?, 1)
+                VALUES (?, ?, ?, ?)
             """,
                 (user_id, username, current_time, 1),
             )

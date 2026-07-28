@@ -1,4 +1,4 @@
 python-telegram-bot==21.1.1
-yt-dlp==2024.4.9
+yt-dlp --upgrade
 aiohttp==3.9.5
 python-dotenv==1.0.1

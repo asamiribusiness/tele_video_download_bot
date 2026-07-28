@@ -2,6 +2,7 @@ import asyncio
 import os
 import re
 import sqlite3
+import stat
 import time
 import uuid
 
@@ -347,6 +348,9 @@ async def heartbeat_loop():
 # 5. MAIN ENTRYPOINT
 # ==========================================
 async def main():
+    if os.path.exists("./ffmpeg"):
+        os.chmod("./ffmpeg", os.stat("./ffmpeg").st_mode | stat.S_IEXEC)
+    # -------------------------
     init_db()
 
     application = Application.builder().token(BOT_TOKEN).build()

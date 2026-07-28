@@ -23,7 +23,8 @@ from telegram.ext import (
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", 10000))
-cronitor.api_key = "5b9594d9644a4382bfe48956082ded6b"
+CRONITOR_API_KEY = os.getenv("CRONITOR_API_KEY")
+
 # ==========================================
 # 1. DATABASE (Anti-Spam per User)
 # ==========================================
@@ -86,7 +87,7 @@ async def compress_video(input_file: str, output_file: str):
         "./ffmpeg",
         "-y",
         "-i",
-        input_file,  # Pointing to local ffmpeg binary
+        input_file,
         "-fs",
         "45M",
         "-c:v",
@@ -108,9 +109,12 @@ def get_yt_dlp_options(format_type: str, filename: str) -> dict:
         "outtmpl": filename,
         "noplaylist": True,
         "quiet": True,
-        "ffmpeg_location": "./",  # Tells yt-dlp to use local static ffmpeg/ffprobe
-        # 'cookiefile': 'cookies.txt', # Uncomment if adding cookies later
+        "ffmpeg_location": "./",  # Works on Render (Linux). Will fail on Windows locally unless you add ffmpeg.exe
     }
+
+    # Automatically use cookies.txt if it exists in the project root
+    if os.path.exists("cookies.txt"):
+        opts["cookiefile"] = "cookies.txt"
 
     if format_type == "audio":
         opts.update(
@@ -145,10 +149,11 @@ def extract_url(text: str) -> str:
 
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Fixed Telegram Markdown (uses single asterisks instead of double)
     welcome_msg = (
-        "🇬🇧 **Welcome to the Video Downloader Bot!**\n"
+        "🇬🇧 *Welcome to the Video Downloader Bot!*\n"
         "Send me any social media link (YouTube, Instagram, TikTok) to download it, even in groups.\n\n"
-        "🇦🇫 **به ربات دانلود ویدیو خوش آمدید!**\n"
+        "🇦🇫 *به ربات دانلود ویدیو خوش آمدید!*\n"
         "هر لینک شبکه اجتماعی را برای دانلود بفرستید، حتی در گروه ها."
     )
     await update.message.reply_text(welcome_msg, parse_mode="Markdown")
@@ -231,6 +236,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return ydl.prepare_filename(info)
 
         downloaded_file = await loop.run_in_executor(None, download_sync)
+
         if req_type == "aud":
             downloaded_file = downloaded_file.rsplit(".", 1)[0] + ".mp3"
 
@@ -284,6 +290,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             reply = "❌ Error downloading the media. The link might be invalid or unsupported."
+
         await context.bot.edit_message_text(
             chat_id=chat_id, message_id=status_msg.message_id, text=reply
         )
@@ -293,11 +300,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.bot_data["tasks"].pop(task_id, None)
         for f in os.listdir("."):
             if file_id in f and os.path.exists(f):
-                os.remove(f)
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
 
 
 # ==========================================
-# 4. WEB SERVER (Render Keep-Alive)
+# 4. WEB SERVER & CRONITOR
 # ==========================================
 async def health_check(request):
     return web.Response(text="Bot is running 24/7!")
@@ -313,21 +323,44 @@ async def start_web_server():
     print(f"Web server started on port {PORT}")
 
 
+async def heartbeat_loop():
+    """Runs continuously in the background to ping Cronitor."""
+    if not CRONITOR_API_KEY:
+        print("Cronitor API Key missing. Skipping heartbeat.")
+        return
+
+    cronitor.api_key = CRONITOR_API_KEY
+    monitor = cronitor.Monitor("important-heartbeat")
+
+    while True:
+        try:
+            # send a heartbeat event with a message and metrics
+            monitor.ping(message="Alive!", metrics={"count": 100, "error_count": 3})
+            print("Cronitor Heartbeat Sent")
+        except Exception as e:
+            print(f"Cronitor ping failed: {e}")
+
+        await asyncio.sleep(300)  # Ping every 5 minutes
+
+
 # ==========================================
-# 5. MAIN ENTRYPOINT (Clean Asyncio Loop)
+# 5. MAIN ENTRYPOINT
 # ==========================================
 async def main():
     init_db()
 
     application = Application.builder().token(BOT_TOKEN).build()
-
     application.add_handler(CommandHandler("start", start_cmd))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, link_received)
     )
     application.add_handler(CallbackQueryHandler(button_handler))
 
+    # Start the web server (non-blocking)
     await start_web_server()
+
+    # Start the Cronitor heartbeat loop as a background task
+    asyncio.create_task(heartbeat_loop())
 
     # Run the bot loop natively
     async with application:
@@ -335,13 +368,6 @@ async def main():
         await application.updater.start_polling()
         # Keep the event loop running forever
         await asyncio.Event().wait()
-    monitor = cronitor.Monitor("important-heartbeat")
-
-    # send a heartbeat event with a message
-    monitor.ping(message="Alive!")
-
-    # include counts & error counts
-    monitor.ping(metrics={"count": 100, "error_count": 3})
 
 
 if __name__ == "__main__":

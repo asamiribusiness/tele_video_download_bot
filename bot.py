@@ -380,8 +380,9 @@ async def heartbeat_loop():
 # 5. MAIN ENTRYPOINT
 # ==========================================
 async def main():
-    if os.path.exists("./ffmpeg"):
-        os.chmod("./ffmpeg", os.stat("./ffmpeg").st_mode | stat.S_IEXEC)
+    for binary in ["./ffmpeg", "./ffprobe"]:
+        if os.path.exists(binary):
+            os.chmod(binary, os.stat(binary).st_mode | stat.S_IEXEC)
     # -------------------------
     init_db()
 

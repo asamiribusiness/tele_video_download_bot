@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from multiprocessing import context
 import os
 import re
 import sqlite3
@@ -299,30 +300,30 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 os.remove(downloaded_file)
             downloaded_file = compressed_file
 
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=status_msg.message_id,
-                text="📤 Uploading... (در حال آپلود...)",
-            )
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=status_msg.message_id,
+            text="📤 Uploading... (در حال آپلود...)",
+        )
 
-            with open(downloaded_file, "rb") as f:
-                if req_type == "vid":
-                    await context.bot.send_video(
-                        chat_id=chat_id,
-                        video=f,
-                        supports_streaming=True,
-                        read_timeout=120,  # Increased to 2 minutes
-                        write_timeout=120,  # Increased to 2 minutes
-                        connect_timeout=120,  # Increased to 2 minutes
-                    )
-                else:
-                    await context.bot.send_audio(
-                        chat_id=chat_id,
-                        audio=f,
-                        read_timeout=120,
-                        write_timeout=120,
-                        connect_timeout=120,
-                    )
+        with open(downloaded_file, "rb") as f:
+            if req_type == "vid":
+                await context.bot.send_video(
+                    chat_id=chat_id,
+                    video=f,
+                    supports_streaming=True,
+                    read_timeout=120,  # Increased to 2 minutes
+                    write_timeout=120,  # Increased to 2 minutes
+                    connect_timeout=120,  # Increased to 2 minutes
+                )
+            else:
+                await context.bot.send_audio(
+                    chat_id=chat_id,
+                    audio=f,
+                    read_timeout=120,
+                    write_timeout=120,
+                    connect_timeout=120,
+                )
 
         await context.bot.delete_message(
             chat_id=chat_id, message_id=status_msg.message_id

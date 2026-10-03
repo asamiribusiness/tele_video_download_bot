@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import re
 import sqlite3
@@ -11,6 +12,7 @@ import yt_dlp
 from aiohttp import web
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -25,6 +27,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", 10000))
 CRONITOR_API_KEY = os.getenv("CRONITOR_API_KEY")
+logger = logging.getLogger(__name__)
 
 # ==========================================
 # 1. DATABASE (Anti-Spam per User)
@@ -234,30 +237,36 @@ async def link_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    clicker_id = query.from_user.id
 
-    # Parse callback data
-    req_type, task_id, original_user_id = query.data.split("|")
-
-    # Verify clicker is the person who sent the link
-    if str(clicker_id) != original_user_id:
-        await query.answer("This is not your request! ❌", show_alert=True)
-        return
-
+    # 1. Answer the query immediately so the button stops "spinning/loading"
     await query.answer()
 
-    url = context.bot_data["tasks"].get(task_id)
-    if not url:
-        await query.edit_message_text("❌ Error: Task expired or link lost.")
-        return
-
-    chat_id = query.message.chat_id
-    status_msg = await query.edit_message_text("⏳ Downloading... (در حال دانلود...)")
-
-    file_id = f"{chat_id}_{int(time.time())}"
-    raw_file = f"{file_id}.%(ext)s"
-
     try:
+        clicker_id = query.from_user.id
+        req_type, task_id, original_user_id = query.data.split("|")
+
+        # Verify clicker is the person who sent the link
+        if str(clicker_id) != original_user_id:
+            await query.answer("This is not your request! ❌", show_alert=True)
+            return
+
+        # 2. Prevent crashes if the server restarted and memory wiped
+        if "tasks" not in context.bot_data or task_id not in context.bot_data["tasks"]:
+            await query.edit_message_text(
+                "❌ Error: Bot restarted or link expired. Please send the link again."
+            )
+            return
+
+        url = context.bot_data["tasks"][task_id]
+        chat_id = query.message.chat_id
+
+        status_msg = await query.edit_message_text(
+            "⏳ Downloading... (در حال دانلود...)"
+        )
+
+        file_id = f"{chat_id}_{int(time.time())}"
+        raw_file = f"{file_id}.%(ext)s"
+
         opts = get_yt_dlp_options("audio" if req_type == "aud" else "video", raw_file)
 
         # Run yt_dlp without blocking the async event loop
@@ -307,36 +316,39 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.delete_message(
             chat_id=chat_id, message_id=status_msg.message_id
         )
+
+        reply_to = (
+            query.message.reply_to_message.message_id
+            if query.message.reply_to_message
+            else None
+        )
         await context.bot.send_message(
             chat_id=chat_id,
             text="✅ Download finished! (دانلود با موفقیت انجام شد!)",
-            reply_to_message_id=query.message.reply_to_message.message_id
-            if query.message.reply_to_message
-            else None,
+            reply_to_message_id=reply_to,
         )
 
-    except yt_dlp.utils.DownloadError as e:
-        error_msg = str(e).lower()
-        if "sign in" in error_msg or "cookie" in error_msg:
-            reply = (
-                "⚠️ Authentication required. This video is age-restricted or private."
-            )
-        else:
-            reply = "❌ Error downloading the media. The link might be invalid or unsupported."
-
-        await context.bot.edit_message_text(
-            chat_id=chat_id, message_id=status_msg.message_id, text=reply
-        )
+    except Exception as e:
+        # 3. THE ULTIMATE SAFETY NET: Catch ALL errors and print them straight to Telegram
+        error_text = f"❌ Error:\n{str(e)[:200]}"
+        print(f"CRITICAL BUTTON ERROR: {str(e)}")
+        try:
+            await query.edit_message_text(error_text)
+        except Exception:
+            pass
 
     finally:
-        # Cleanup memory and files
-        context.bot_data["tasks"].pop(task_id, None)
-        for f in os.listdir("."):
-            if file_id in f and os.path.exists(f):
-                try:
-                    os.remove(f)
-                except Exception:
-                    pass
+        # Safe Cleanup
+        if "tasks" in context.bot_data:
+            context.bot_data["tasks"].pop(task_id, None)
+
+        if "file_id" in locals():
+            for f in os.listdir("."):
+                if file_id in f and os.path.exists(f):
+                    try:
+                        os.remove(f)
+                    except Exception:
+                        pass
 
 
 # ==========================================
